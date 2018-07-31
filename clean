@@ -1,0 +1,5 @@
+#!/bin/bash
+set -e -o pipefail -u
+UTILS_ROOT="$(dirname ${BASH_SOURCE[0]})"
+"${UTILS_ROOT}/clean_docker"
+make -f "${UTILS_ROOT}/utils/project.mk" clean

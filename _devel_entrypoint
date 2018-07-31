@@ -1,0 +1,153 @@
+#!/usr/bin/env python
+import argparse
+import errno
+import os
+import re
+import signal
+import sys
+from contextlib import contextmanager
+from fcntl import flock, LOCK_EX
+from subprocess import check_call
+from textwrap import dedent
+
+
+def main():
+    no_wrapper = lambda x: x
+    required_env_variables = [
+        # (name, wrapper, description)
+        ('HOST_USER', no_wrapper, 'Name of host user that launches container'),
+        ('HOST_UID', int, 'ID of host user that launches container'),
+        ('HOST_GID', int, 'Working group ID of host user that launches container'),
+        ('HOST_HOME', no_wrapper, 'Home directory of host user that launches container'),
+        ('PROJECT_ROOT', no_wrapper, 'Default directory of container'),
+    ]
+
+    description = dedent('''
+    Entrypoint for devel containers. Allows to change directory before
+    executing command and set environment variables (like /usr/bin/env).
+
+    Requires environment variables (they should be set via docker-compose.yml):
+    ''') + '\n'.join(
+        ' * {}: {}'.format(name, descr) for name, _, descr in required_env_variables
+    )
+    parser = argparse.ArgumentParser(
+        description=description, formatter_class=argparse.RawTextHelpFormatter)
+    parser.add_argument(
+        '--cd', default=None,
+        help='Change directory before running script')
+    parser.add_argument(
+        '--init-timeout', type=int, default=10,
+        help='Timeout in seconds for container initialization. Should be integer.')
+    parser.add_argument(
+        '--additional-bash-command', action='append', default=[],
+        help='''
+        Bash command that will be executed after all
+        initializations. Command runs under HOST_USER and in
+        PROJECT_ROOT directory. May be specified multiple times, then
+        shell commands will run consecutively. Any `docker exec`
+        invocation will be blocked until all shell commands
+        completed. Whole command list must complete until
+        `--initial-timeout` ends.
+        ''')
+    parser.add_argument('cmd')
+    parser.add_argument('args', nargs=argparse.REMAINDER)
+    args = parser.parse_args()
+
+    try:
+        env = {
+            name: wrapper(os.environ[name])
+            for name, wrapper, _ in required_env_variables
+        }
+    except KeyError as err:
+        sys.stderr.write('error: environment variable {!r} must be set.\n'.format(err.args[0]))
+        sys.stderr.flush()
+        exit(127)
+
+    environ = dict(os.environ)
+    cmd = [args.cmd] + args.args
+
+    while cmd:
+        match = re.match(r'^([A-Za-z_]\w+)=(.*)$', cmd[0])
+        if match is None:
+            break
+
+        key, value = match.groups()
+        environ[key] = value
+        cmd = cmd[1:]
+
+    if not cmd:
+        sys.stderr.write('error: command not specified.\n')
+        sys.stderr.flush()
+        exit(127)
+
+    with timeout(args.init_timeout), open('/.host_user_init', 'a+') as lock_file:
+        flock(lock_file.fileno(), LOCK_EX)
+        lock_file.seek(0)
+        if lock_file.read().strip() != 'ok':
+            init_container(
+                host_user=env['HOST_USER'],
+                host_uid=env['HOST_UID'],
+                host_gid=env['HOST_GID'],
+                host_home=env['HOST_HOME'],
+                project_root=env['PROJECT_ROOT'],
+                additional_bash_commands=args.additional_bash_command)
+            lock_file.seek(0)
+            lock_file.truncate()
+            lock_file.write('ok')
+
+    directory = args.cd or env['PROJECT_ROOT']
+    os.chdir(directory)
+
+    os.execvpe('sudo', ['sudo', '-u', env['HOST_USER'], '-H', '-E', '--'] + cmd, environ)
+
+
+def init_container(host_user, host_uid, host_gid, host_home,
+                   project_root, additional_bash_commands):
+    check_call(['groupadd', '--gid={:d}'.format(host_gid), host_user, '--non-unique'])
+    check_call(['useradd', '--no-create-home', '--uid={:d}'.format(host_uid),
+                '--gid={:d}'.format(host_gid), '--home-dir=' + host_home,
+                host_user])
+
+    with open('/etc/sudoers', 'a+') as sudoers:
+        sudoers.seek(0, os.SEEK_END)
+        sudoers.write('{} ALL = NOPASSWD: ALL\n'.format(host_user))
+
+    docker_sock = '/var/run/docker.sock'
+    if os.access(docker_sock, os.F_OK):
+        docker_gid = os.stat(docker_sock).st_gid
+        check_call(['groupadd', '--gid={:d}'.format(docker_gid),
+                    '--non-unique', 'docker-socket-group'])
+        check_call(['gpasswd', '-a', host_user, 'docker-socket-group'])
+
+    try:
+        os.makedirs(host_home)
+    except EnvironmentError as err:
+        if err.errno != errno.EEXIST:
+            raise
+
+    os.chown(host_home, host_uid, host_gid)
+
+    for bash_cmd in additional_bash_commands:
+        check_call([
+            'sudo', '-u', host_user, '-H',
+            '/bin/bash', '-e', '-c', bash_cmd,
+        ], preexec_fn=lambda: os.chdir(project_root))
+
+
+@contextmanager
+def timeout(seconds):
+    def timeout_handler(signum, frame):  # pylint: disable=unused-argument
+        raise RuntimeError('Timed out: {} seconds'.format(seconds))
+
+    original_handler = signal.signal(signal.SIGALRM, timeout_handler)
+
+    try:
+        signal.alarm(seconds)
+        yield
+    finally:
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, original_handler)
+
+
+if __name__ == '__main__':
+    main()

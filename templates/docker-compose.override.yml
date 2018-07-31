@@ -1,0 +1,4 @@
+# See https://github.com/docker/compose/blob/master/docs/extends.md
+---
+version: '2'
+services: {}

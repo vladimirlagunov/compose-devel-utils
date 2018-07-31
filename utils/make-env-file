@@ -1,0 +1,49 @@
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+import errno
+import getpass
+import os
+import re
+import subprocess
+from collections import OrderedDict
+from hashlib import md5
+
+
+def main():
+    env_to_write = OrderedDict()
+    try:
+        with open('.env') as env_file:
+            for line in env_file:
+                line = line.split('#')[0].strip()
+                if line:
+                    key, value = line.split('=', 1)
+                    env_to_write[key] = value
+    except EnvironmentError as err:
+        if err.errno != errno.ENOENT:
+            raise
+
+    # If COMPOSE_PROJECT_NAME already defined in .env, it should not
+    # be overwritten.
+    project_name_key = 'COMPOSE_PROJECT_NAME'
+    if project_name_key not in env_to_write:
+        env_to_write[project_name_key] = md5(
+            ':'.join([getpass.getuser(), os.getcwd()])
+        ).hexdigest()[:12]
+
+    # Variables for docker-machine will be overwritten.
+    docker_machine_name = os.environ.get('DOCKER_MACHINE_NAME')
+    if docker_machine_name:
+        docker_env_raw = subprocess.check_output(['docker-machine', 'env', docker_machine_name])
+        for line in docker_env_raw.split('\n'):
+            line = line.split('#', 1)[0].strip()
+            match = re.match(r'^export +([^=]+)=(["\'])(.*)\2$', line)
+            if match:
+                env_to_write[match.group(1)] = match.group(3)
+
+    with open('.env', 'w') as env_file:
+        for key, value in env_to_write.iteritems():
+            env_file.writelines('{}={}\n'.format(key, value))
+
+
+if __name__ == '__main__':
+    main()

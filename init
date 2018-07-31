@@ -1,0 +1,2 @@
+#!/usr/bin/env bash
+exec /usr/bin/env make -rR -f "$(dirname ${BASH_SOURCE[0]})/utils/project.mk" init

@@ -1,0 +1,23 @@
+#!/usr/bin/python
+# -*- coding: utf-8 -*-
+import os
+import sys
+
+
+def main():
+    name = 'up-and-exec-container'
+    runner_script = os.path.join(
+        os.path.dirname(os.path.realpath(sys.argv[0])), name,
+    )
+    os.execv(
+        runner_script,
+        [
+            name,
+            '--project-dir', os.path.abspath(os.path.dirname(sys.argv[0])),
+            '--compose-label-name', os.path.basename(sys.argv[0]),
+        ] + sys.argv[1:]
+    )
+
+
+if __name__ == '__main__':
+    main()

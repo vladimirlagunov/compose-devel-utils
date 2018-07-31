@@ -1,0 +1,106 @@
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+'''
+Проверяет, что текущая версия docker-compose 1.7.*.
+
+Если docker-compose не установлен или установлен, но другой версии,
+то скачивает его.
+
+Создаёт символьную ссылку на правильный docker-compose в
+./bin/docker-compose
+'''
+from __future__ import print_function
+import errno
+import os
+import re
+import subprocess
+import sys
+from contextlib import closing
+try:
+    # python 3
+    from urllib.request import urlopen
+except ImportError:
+    # python 2
+    from urllib2 import urlopen
+
+
+REQUIRED_VERSION_PREFIX = '1.22.'
+REQUIRED_VERSION = '1.22.0'
+
+
+def main():
+    destdir = os.path.abspath(sys.argv[1])
+    destpath = os.path.join(destdir, 'docker-compose')
+
+    if is_good_candidate(destpath):
+        return
+
+    try:
+        default_docker_compose = subprocess.check_output(
+            ['which', 'docker-compose']
+        ).strip()
+    except subprocess.CalledProcessError:
+        pass
+    else:
+        if is_good_candidate(default_docker_compose):
+            try:
+                os.remove(destpath)
+            except OSError as err:
+                if err.errno != errno.ENOENT:
+                    raise
+            os.symlink(default_docker_compose, destpath)
+            return
+
+    os_name, _, _, _, arch_name = os.uname()
+    download_url = 'https://github.com/docker/compose/releases/download/{}/docker-compose-{}-{}'.format(
+        REQUIRED_VERSION, os_name, arch_name,
+    )
+    print('Downloading {} into {}'.format(download_url, destpath), file=sys.stderr)
+    download_file(download_url, destpath)
+    os.chmod(destpath, 0o755)
+
+
+def download_file(url, destpath):
+    # TODO: is there a such function in standard library?
+    tmppath = destpath + '.tmp'
+    try:
+        with open(tmppath, 'wb') as destfile, closing(urlopen(url)) as response:
+            try:
+                content_size = int(response.headers['content-length'])
+            except (KeyError, ValueError):
+                content_size = None
+            count = 0
+            while True:
+                chunk = response.read(512 * 1024)
+                if not chunk:
+                    break
+                count += len(chunk)
+                if content_size:
+                    print(
+                        '... {:2.1f}%'.format(count * 100.0 / content_size),
+                        file=sys.stderr,
+                    )
+                    sys.stderr.flush()
+                destfile.write(chunk)
+    except:
+        os.remove(tmppath)
+        raise
+    else:
+        os.rename(tmppath, destpath)
+
+
+def is_good_candidate(candidate):
+    try:
+        version = subprocess.check_output([candidate, '-v'])
+    except OSError as err:
+        if err.errno not in (errno.ENOENT, errno.EPERM):
+            raise
+    else:
+        version = re.sub('^docker-compose.* version:? ', '', version)
+        if version.startswith(REQUIRED_VERSION_PREFIX):
+            return candidate
+    return None
+
+
+if __name__ == '__main__':
+    main()

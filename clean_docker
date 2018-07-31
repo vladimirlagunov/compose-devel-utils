@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+set +e
+
+DOCKER_COMPOSE="$(dirname ${BASH_SOURCE[0]})/bin/docker-compose"
+
+if [[ -f "${DOCKER_COMPOSE}" ]]; then
+    $DOCKER_COMPOSE down -v
+fi
+
+./make-docker-compose-yml clean

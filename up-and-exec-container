@@ -1,0 +1,146 @@
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+from __future__ import print_function
+import argparse
+import errno
+import os
+import sys
+import tempfile
+from subprocess import check_call, STDOUT, CalledProcessError
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--project-dir', required=True)
+    parser.add_argument('--compose-label-name', required=True)
+    parser.add_argument('--quick', action='store_true')
+    parser.add_argument('cmd')
+    parser.add_argument('args', nargs=argparse.REMAINDER)
+    args = parser.parse_args()
+
+    project_dir = args.project_dir
+    compose_label_name = args.compose_label_name
+    cmd = [args.cmd] + args.args
+
+    up_and_exec_container(project_dir, compose_label_name, cmd, args.quick)
+
+
+def up_and_exec_container(project_dir, compose_label_name, cmd, quick):
+    project_dir = os.path.abspath(project_dir)
+    compose_utils_dir = os.path.abspath(os.path.dirname(__file__))
+    real_cwd = os.getcwd()
+
+    os.chdir(project_dir)
+    docker_compose = os.path.join(compose_utils_dir, 'bin', 'docker-compose')
+    docker_compose_yml = os.path.join(project_dir, 'docker-compose.yml')
+
+    if not os.access(docker_compose, os.X_OK) or not os.access(docker_compose_yml, os.R_OK):
+        if quick:
+            print("Error: docker container is not build. Can't start quickly.", file=sys.stderr)
+            exit(126)
+
+        check_call_silent([os.path.join(compose_utils_dir, 'init')])
+        check_call([docker_compose, 'build', '--pull'])
+
+    compose_env = read_compose_env(project_dir)
+    check_docker_machine(compose_env)
+
+    try:
+        check_call_silent(
+            [docker_compose, 'up', '-d', compose_label_name],
+            cwd=project_dir,
+            stderr=STDOUT,
+        )
+    except CalledProcessError as err:
+        print((
+            'Command {0.cmd!r} exit with code {0.returncode}.'
+            'Process stdout+stderr:\n{0.output}'
+        ).format(err), file=sys.stderr)
+        exit(1)
+
+    docker_args = [
+        docker_compose, 'exec',
+    ]
+    if not sys.stdin.isatty() or not sys.stdout.isatty() or not sys.stderr.isatty():
+        docker_args += ['-T']
+    docker_args += [
+        compose_label_name,
+        '/entrypoint',
+        '--cd', real_cwd,
+        'COMPOSE_PROJECT_NAME=' + compose_project_name(compose_env),
+    ]
+    docker_args.extend(cmd)
+
+    os.execvp(docker_compose, docker_args)
+
+
+def read_compose_env(project_dir):
+    result = {}
+    env_file_name = os.path.join(project_dir, '.env')
+    try:
+        env_file = open(env_file_name)
+    except EnvironmentError as err:
+        if err.errno != errno.ENOENT:
+            raise
+        else:
+            print(
+                'File {} is required and should contain COMPOSE_PROJECT_NAME'.format(env_file_name),
+                file=sys.stderr
+            )
+            exit(125)
+    with env_file:
+        for line in env_file:
+            line = line.split('#')[0].strip()
+            if line:
+                key, value = line.split('=', 1)
+                result[key] = value
+    return result
+
+
+def check_docker_machine(compose_env):
+    docker_machine_vars = frozenset([
+        'DOCKER_CERT_PATH',
+        'DOCKER_HOST',
+        'DOCKER_MACHINE_NAME',
+        'DOCKER_TLS_VERIFY',
+    ])
+    for key, value in compose_env.items():
+        if key in docker_machine_vars and os.environ.get(key) != value:
+            raise RuntimeError(
+                'Project was configured for another docker-machine.'
+                ' Ensure that docker-machine environment variables'
+                ' are loaded or run `compose-devel-utils/clean`'
+            )
+
+
+def compose_project_name(compose_env):
+    key = 'COMPOSE_PROJECT_NAME'
+    try:
+        return compose_env[key]
+    except KeyError:
+        print("Error: can't find {} in file `.env`".format(key), file=sys.stderr)
+        exit(125)
+
+
+def check_call_silent(*args, **kwargs):
+    assert 'stdout' not in kwargs
+    assert kwargs.get('stderr', STDOUT) == STDOUT
+    kwargs['stderr'] = STDOUT
+
+    with tempfile.TemporaryFile() as tmp_stdout:
+        kwargs['stdout'] = tmp_stdout
+        try:
+            check_call(*args, **kwargs)
+        except CalledProcessError:
+            tmp_stdout.seek(0)
+            while True:
+                block = tmp_stdout.read(4096)
+                if not block:
+                    break
+                sys.stderr.write(block)
+            sys.stderr.flush()
+            raise
+
+
+if __name__ == '__main__':
+    main()
